@@ -1,0 +1,8 @@
+requests
+mysql-connector-python
+pandas
+bcrypt
+flask
+flask-cors
+pyjwt
+flasgger

@@ -1,0 +1,83 @@
+version: '3.8'
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: airflow
+      MYSQL_USER: airflow
+      MYSQL_PASSWORD: airflow
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-db-volume:/var/lib/mysql
+    healthcheck:
+      test: [ "CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot" ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  airflow-webserver:
+    image: apache/airflow:2.7.1
+    restart: always
+    depends_on:
+      mysql:
+        condition: service_started
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+mysqlconnector://airflow:airflow@mysql/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION=True
+      # Auto-configure the MySQL connection for the DAG (Tweets storage)
+      # Password 'bhanu@12' is URL-encoded to 'bhanu%4012'
+      # We assume the database name is 'twit ter_data'. Change if needed.
+      - AIRFLOW_CONN_MYSQL_DEFAULT=mysql://bhanu:bhanu%408@35.200.241.77:3306/twitter_data
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./requirements.txt:/requirements.txt
+      - ./uipath_etl:/opt/airflow/uipath_etl
+    ports:
+      - "8080:8080"
+    command: bash -c "pip install -r /requirements.txt && airflow db init && airflow users create --username airflow --firstname Peter --lastname Parker --role Admin --email spiderman@superhero.org --password airflow && airflow webserver"
+    healthcheck:
+      test: [ "CMD", "curl", "--fail", "http://localhost:8080/health" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.1
+    restart: always
+    depends_on:
+      airflow-webserver:
+        condition: service_started
+    environment:
+      - AIRFLOW__CORE__EXECUTOR=LocalExecutor
+      - AIRFLOW__DATABASE__SQL_ALCHEMY_CONN=mysql+mysqlconnector://airflow:airflow@mysql/airflow
+      - AIRFLOW__CORE__LOAD_EXAMPLES=False
+      - AIRFLOW_CONN_MYSQL_DEFAULT=mysql://bhanu:bhanu%408@35.200.241.77:3306/twitter_data
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - ./logs:/opt/airflow/logs
+      - ./plugins:/opt/airflow/plugins
+      - ./requirements.txt:/requirements.txt
+      - ./uipath_etl:/opt/airflow/uipath_etl
+    command: bash -c "pip install -r /requirements.txt && airflow scheduler"
+
+  auth-api:
+    build:
+      context: ./uipath_etl
+      dockerfile: Dockerfile
+    container_name: uipath-auth-api
+    restart: always
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uipath_etl:/app
+    command: python api.py
+
+volumes:
+  mysql-db-volume:

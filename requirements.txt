@@ -1,0 +1,6 @@
+apache-airflow==2.7.1
+apache-airflow-providers-mysql
+mysql-connector-python
+
+pandas
+requests
