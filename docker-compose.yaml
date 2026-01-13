@@ -81,7 +81,7 @@ services:
 
   uipath-ui:
     build:
-      context: ../uipath-ui
+      context: ../rpa-insights-frontend
       dockerfile: Dockerfile
     container_name: uipath-ui
     restart: always
