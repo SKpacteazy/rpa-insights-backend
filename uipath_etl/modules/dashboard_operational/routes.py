@@ -179,6 +179,6 @@ def get_benchmarking(current_user):
     """
     start, end = get_dates_from_request()
     data = dashboard_service.get_benchmarking(start, end)
-    if data:
+    if data is not None:
         return jsonify(data), 200
     return jsonify({"message": "Error fetching benchmarking"}), 500

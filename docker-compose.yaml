@@ -79,5 +79,16 @@ services:
       - ./uipath_etl:/app
     command: python api.py
 
+  uipath-ui:
+    build:
+      context: ../uipath-ui
+      dockerfile: Dockerfile
+    container_name: uipath-ui
+    restart: always
+    ports:
+      - "80:80"
+    depends_on:
+      - auth-api
+
 volumes:
   mysql-db-volume:

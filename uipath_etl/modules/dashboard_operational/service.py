@@ -204,7 +204,7 @@ class DashboardOpsService:
                 FROM (
                     SELECT TIMESTAMPDIFF(SECOND, creation_time, NOW()) as age_sec
                     FROM queue_items
-                    WHERE status = 'New'
+                    WHERE status = 'New' AND creation_time BETWEEN %s AND %s
                 ) as sub
             """
 
@@ -217,7 +217,8 @@ class DashboardOpsService:
             cursor.execute(threshold_query)
             threshold_res = cursor.fetchone()
 
-            cursor.execute(buckets_query)
+            # Execute buckets query with date params
+            cursor.execute(buckets_query, (start_date, end_date))
             buckets_res = cursor.fetchone()
 
             buckets = {}
