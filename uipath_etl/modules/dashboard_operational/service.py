@@ -18,7 +18,7 @@ class DashboardOpsService:
     def _get_date_range(self, start_date, end_date):
         """Helper to set default dates to last 24h if None"""
         if not start_date:
-            start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d %H:%M:%S')
+            start_date = '2000-01-01 00:00:00'
         if not end_date:
             end_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         return start_date, end_date
@@ -55,6 +55,8 @@ class DashboardOpsService:
             for row in results:
                 status = row['status']
                 count = row['count']
+                if status == "InProgress":
+                    status = "In Progress"
                 stats[status] = count
                 total += count
             
