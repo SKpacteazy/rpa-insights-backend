@@ -68,7 +68,7 @@ services:
 
   auth-api:
     build:
-      context: ./uipath_etl
+      context: ./rpa-insights-frontend
       dockerfile: Dockerfile
     container_name: uipath-auth-api
     restart: always
