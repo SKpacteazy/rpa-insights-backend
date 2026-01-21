@@ -70,6 +70,35 @@ def get_sla_risk(current_user):
     if data: return jsonify(data), 200
     return jsonify({"message": "Error fetching SLA risk"}), 500
 
+@dashboard_sla_bp.route('/sla/breaches', methods=['GET'])
+@token_required
+def get_sla_breaches(current_user):
+    """
+    Dashboard 2: Recent SLA Breaches
+    ---
+    tags:
+      - Dashboard 2 (SLA & Risk)
+    security:
+      - Bearer: []
+    parameters:
+      - name: limit
+        in: query
+        type: integer
+        default: 10
+      - name: sla_hours
+        in: query
+        type: integer
+        default: 24
+    responses:
+      200:
+        description: List of items that have breached SLA
+    """
+    limit = int(request.args.get('limit', 10))
+    sla = int(request.args.get('sla_hours', 24))
+    data = dashboard_service.get_recent_sla_breaches(limit, sla)
+    if data is not None: return jsonify(data), 200
+    return jsonify({"message": "Error fetching SLA breaches"}), 500
+
 @dashboard_sla_bp.route('/quality/exceptions', methods=['GET'])
 @token_required
 def get_exceptions(current_user):

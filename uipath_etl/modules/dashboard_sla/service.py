@@ -18,9 +18,9 @@ class DashboardSlaService:
     def _get_date_range(self, start_date, end_date):
         """Helper to set default dates to last 24h if None"""
         if not start_date:
-            start_date = (datetime.now() - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+            start_date = '1970-01-01 00:00:00'
         if not end_date:
-            end_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            end_date = (datetime.now() + timedelta(days=365)).strftime('%Y-%m-%d %H:%M:%S')
         return start_date, end_date
 
     def get_sla_compliance(self, start_date=None, end_date=None, sla_hours=24):
@@ -89,6 +89,7 @@ class DashboardSlaService:
         """
         B. SLA Risk & Aging
         Risk Tiles: Close to Breach (80% of SLA), Currently Breached (but still running)
+        Aging Chart: Distribution of Active Items (New, In Progress) by Age Buckets
         """
         conn = self.get_connection()
         if not conn:
@@ -99,6 +100,7 @@ class DashboardSlaService:
             sla_seconds = sla_hours * 3600
             warning_threshold = sla_seconds * 0.8
             
+            # 1. Active items risk counts
             query = f"""
                 SELECT 
                     SUM(CASE WHEN 
@@ -112,6 +114,7 @@ class DashboardSlaService:
                 WHERE status IN ('New', 'In Progress')
             """
             
+            # 2. Historical Breach Rate (completed items)
             breach_rate_query = f"""
                  SELECT 
                     COUNT(*) as total,
@@ -130,14 +133,111 @@ class DashboardSlaService:
             breaches_hist = rate_res['breaches'] if rate_res else 0
             aging_breach_rate = round((breaches_hist / total_hist * 100), 2) if total_hist > 0 else 0.0
 
+            # 3. Aging Distribution for Active Items
+            # Buckets: 0-30m, 30-60m, 60-90m, >90m
+            # Status: Safe (<80%), At Risk (>=80% <100%), Breached (>=100%)
+            dist_query = """
+                SELECT 
+                    TIMESTAMPDIFF(MINUTE, creation_time, NOW()) as age_minutes,
+                    TIMESTAMPDIFF(SECOND, creation_time, NOW()) as age_seconds
+                FROM queue_items
+                WHERE status IN ('New', 'In Progress')
+            """
+            cursor.execute(dist_query)
+            active_items = cursor.fetchall()
+            
+            buckets = {
+                "0-30m": {"safe": 0, "at_risk": 0, "breached": 0},
+                "30-60m": {"safe": 0, "at_risk": 0, "breached": 0},
+                "60-90m": {"safe": 0, "at_risk": 0, "breached": 0},
+                ">90m":   {"safe": 0, "at_risk": 0, "breached": 0}
+            }
+            
+            for item in active_items:
+                age_min = item['age_minutes']
+                age_sec = item['age_seconds']
+                
+                # Determine Bucket
+                bucket_key = ">90m"
+                if age_min < 30:
+                    bucket_key = "0-30m"
+                elif age_min < 60:
+                    bucket_key = "30-60m"
+                elif age_min < 90:
+                    bucket_key = "60-90m"
+                
+                # Determine Risk Status
+                if age_sec >= sla_seconds:
+                    status = "breached"
+                elif age_sec >= warning_threshold:
+                    status = "at_risk"
+                else:
+                    status = "safe"
+                
+                buckets[bucket_key][status] += 1
+
+            clean_distribution = [
+                {"range": k, "safe": v["safe"], "at_risk": v["at_risk"], "breached": v["breached"]}
+                for k, v in buckets.items()
+            ]
+
             return {
                 "items_close_to_sla_breach": int(risk_res['close_to_breach']) if risk_res['close_to_breach'] else 0,
                 "items_breached_sla_current": int(risk_res['already_breached']) if risk_res['already_breached'] else 0,
-                "aging_breach_rate_percent": aging_breach_rate
+                "aging_breach_rate_percent": aging_breach_rate,
+                "aging_distribution": clean_distribution
             }
 
         except Error as e:
             logger.error(f"Error fetching SLA risk: {e}")
+            return None
+        finally:
+            conn.close()
+
+    def get_recent_sla_breaches(self, limit=10, sla_hours=24):
+        """
+        Get recent items that have breached SLA
+        """
+        conn = self.get_connection()
+        if not conn:
+            return None
+        
+        try:
+            cursor = conn.cursor(dictionary=True)
+            sla_seconds = sla_hours * 3600
+            
+            # breached if:
+            # 1. Active (New/InProgress) and age > sla
+            # 2. Completed (Success/Failed) and duration > sla
+            
+            query = f"""
+                SELECT id, queue_definition_id, status, creation_time, 
+                       TIMESTAMPDIFF(SECOND, creation_time, IFNULL(end_processing, NOW())) as duration_seconds,
+                       CASE WHEN end_processing IS NULL THEN 'Active' ELSE 'Completed' END as state
+                FROM queue_items
+                WHERE TIMESTAMPDIFF(SECOND, creation_time, IFNULL(end_processing, NOW())) > {sla_seconds}
+                ORDER BY creation_time DESC
+                LIMIT {limit}
+            """
+            
+            cursor.execute(query)
+            results = cursor.fetchall()
+            
+            formatted_results = []
+            for row in results:
+                formatted_results.append({
+                    "id": row['id'],
+                    "queue_definition_id": row['queue_definition_id'],
+                    "status": row['status'],
+                    "creation_time": row['creation_time'].strftime('%Y-%m-%d %H:%M:%S') if row['creation_time'] else None,
+                    "duration_seconds": int(row['duration_seconds']) if row['duration_seconds'] is not None else 0,
+                    "state": row['state']
+                })
+                
+            return formatted_results
+            
+        except Error as e:
+            logger.error(f"Error fetching recent breaches: {e}")
             return None
         finally:
             conn.close()
@@ -205,17 +305,39 @@ class DashboardSlaService:
             res = cursor.fetchone()
             
             total = res['total'] if res else 0
-            retried = res['retried_items'] if res else 0
+            retried = res['retried_items'] if res and res['retried_items'] is not None else 0
             avg_retry = float(res['avg_retries']) if res and res['avg_retries'] else 0.0
-            success_retries = res['successful_retries'] if res else 0
+            success_retries = res['successful_retries'] if res and res['successful_retries'] is not None else 0
             
             retry_rate = round((retried / total * 100), 2) if total > 0 else 0.0
             retry_success_rate = round((success_retries / retried * 100), 2) if retried > 0 else 0.0
 
+            buckets_query = """
+                SELECT 
+                    SUM(CASE WHEN retry_number = 1 THEN 1 ELSE 0 END) as one_retry,
+                    SUM(CASE WHEN retry_number = 2 THEN 1 ELSE 0 END) as two_retries,
+                    SUM(CASE WHEN retry_number = 3 THEN 1 ELSE 0 END) as three_retries,
+                    SUM(CASE WHEN retry_number >= 4 THEN 1 ELSE 0 END) as four_plus_retries
+                FROM queue_items
+                WHERE retry_number > 0 AND end_processing BETWEEN %s AND %s
+            """
+            cursor.execute(buckets_query, (start_date, end_date))
+            buckets_res = cursor.fetchone()
+            
+            distribution = []
+            if buckets_res:
+                distribution = [
+                    {"retries": "1", "count": int(buckets_res['one_retry']) if buckets_res['one_retry'] else 0},
+                    {"retries": "2", "count": int(buckets_res['two_retries']) if buckets_res['two_retries'] else 0},
+                    {"retries": "3", "count": int(buckets_res['three_retries']) if buckets_res['three_retries'] else 0},
+                    {"retries": "4+", "count": int(buckets_res['four_plus_retries']) if buckets_res['four_plus_retries'] else 0}
+                ]
+
             return {
                 "retry_rate_percent": retry_rate,
                 "avg_retry_count": avg_retry,
-                "retry_success_rate_percent": retry_success_rate
+                "retry_success_rate_percent": retry_success_rate,
+                "distribution": distribution
             }
         except Error as e:
              logger.error(f"Error fetching retry metrics: {e}")
@@ -330,7 +452,8 @@ class DashboardSlaService:
         try:
             cursor = conn.cursor(dictionary=True)
             query = f"""
-                SELECT id, queue_definition_id, creation_time, end_processing as failure_time, retry_number, status
+                SELECT id, queue_definition_id, creation_time, end_processing as failure_time, retry_number, status,
+                       exception_type, exception_reason as failure_reason
                 FROM queue_items
                 WHERE status = 'Failed'
                 ORDER BY end_processing DESC
@@ -338,10 +461,6 @@ class DashboardSlaService:
             """
             cursor.execute(query)
             results = cursor.fetchall()
-            for row in results:
-                row['exception_type'] = 'Unknown'
-                row['failure_reason'] = 'See raw output'
-                
             return results
         except Error as e:
              logger.error(f"Error fetching recent failures: {e}")
@@ -362,21 +481,37 @@ class DashboardSlaService:
             start_date, end_date = self._get_date_range(start_date, end_date)
 
             query = """
-                SELECT COUNT(*) as failure_count
+                SELECT exception_reason as failure_reason, COUNT(*) as failure_count
                 FROM queue_items
                 WHERE status = 'Failed' AND end_processing BETWEEN %s AND %s
+                GROUP BY exception_reason
+                ORDER BY failure_count DESC
+                LIMIT 10
             """
             cursor.execute(query, (start_date, end_date))
-            res = cursor.fetchone()
-            count = res['failure_count'] if res else 0
+            results = cursor.fetchall()
             
-            if count > 0:
-                return [{
-                    "failure_reason": "Generic Failure (Reason Not Logged)",
+            total_query = """
+                SELECT COUNT(*) as total_failures 
+                FROM queue_items 
+                WHERE status = 'Failed' AND end_processing BETWEEN %s AND %s
+            """
+            cursor.execute(total_query, (start_date, end_date))
+            total_res = cursor.fetchone()
+            total_failures = total_res['total_failures'] if total_res else 0
+
+            final_results = []
+            for row in results:
+                reason = row['failure_reason'] if row['failure_reason'] else "Unknown Reason"
+                count = row['failure_count']
+                pct = round((count / total_failures * 100), 2) if total_failures > 0 else 0.0
+                final_results.append({
+                    "failure_reason": reason,
                     "failure_count": count,
-                    "failure_percent": 100.0
-                }]
-            return []
+                    "failure_percent": pct
+                })
+                
+            return final_results
 
         except Error as e:
              logger.error(f"Error fetching failure reasons: {e}")

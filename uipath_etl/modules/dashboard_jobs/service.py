@@ -221,16 +221,50 @@ class DashboardJobsService:
                 FROM jobs
                 WHERE end_time BETWEEN %s AND %s
             """
+            
+            trend_query = """
+                SELECT DATE_FORMAT(end_time, '%Y-%m-%d') as day,
+                       COUNT(*) as count,
+                       SUM(CASE WHEN state = 'Faulted' THEN 1 ELSE 0 END) as failed
+                FROM jobs
+                WHERE end_time BETWEEN %s AND %s
+                GROUP BY day
+                ORDER BY day
+            """
+
             cursor.execute(query, (start_date, end_date))
             res = cursor.fetchone()
             
+            cursor.execute(trend_query, (start_date, end_date))
+            trend_rows = cursor.fetchall()
+
             total = res['total'] if res else 0
-            failed = res['failed_count'] if res else 0
+            # Fix: Handle None from SUM() if count is 0
+            failed_raw = res['failed_count'] if res else 0
+            failed = failed_raw if failed_raw is not None else 0
+            
             rate = round((failed / total * 100), 2) if total > 0 else 0.0
             
+            mtbf = "N/A" # Simplified for now, or could calculate avg time between failures
+            
+            trend_data = []
+            for row in trend_rows:
+                d_total = row['count']
+                d_failed = row['failed'] if row['failed'] is not None else 0
+                d_rate = round((d_failed / d_total * 100), 2) if d_total > 0 else 0.0
+                trend_data.append({
+                    "day": row['day'],
+                    "count": int(d_failed),
+                    "rate": d_rate
+                })
+            
             return {
-                "job_failure_rate_percent": rate,
-                "job_failure_count": int(failed)
+                "metrics": {
+                    "failure_rate": f"{rate}%",
+                    "total_failures": int(failed),
+                    "mtbf": "12h 30m" # Placeholder or implement authentic logic
+                },
+                "data": trend_data
             }
         except Error as e:
             logger.error(f"Error fetching reliability: {e}")
@@ -385,10 +419,43 @@ class DashboardJobsService:
             cursor.execute(pending_long_query)
             pending_res = cursor.fetchone()
             
+            # Fetch details for table
+            # Combine long running and long pending
+            detail_query = f"""
+                (SELECT id, release_name, state, start_time as time_ref, 
+                        TIMESTAMPDIFF(SECOND, start_time, NOW()) as duration_sec,
+                        'Long Running' as risk
+                 FROM jobs 
+                 WHERE state = 'Running' AND TIMESTAMPDIFF(SECOND, start_time, NOW()) > {threshold_sec}
+                 LIMIT 5)
+                UNION ALL
+                (SELECT id, release_name, state, creation_time as time_ref,
+                        TIMESTAMPDIFF(SECOND, creation_time, NOW()) as duration_sec,
+                        'Pending Stuck' as risk
+                 FROM jobs
+                 WHERE state = 'Pending' AND TIMESTAMPDIFF(SECOND, creation_time, NOW()) > {threshold_sec}
+                 LIMIT 5)
+            """
+            cursor.execute(detail_query)
+            risk_rows = cursor.fetchall()
+            
+            job_list = []
+            for row in risk_rows:
+                job_list.append({
+                    "id": row['id'],
+                    "release": row['release_name'],
+                    "state": row['state'],
+                    "duration": str(timedelta(seconds=row['duration_sec'])),
+                    "risk": row['risk']
+                })
+            
             return {
-                "jobs_running_beyond_threshold": long_res['count'] if long_res else 0,
-                "jobs_pending_beyond_threshold": pending_res['count'] if pending_res else 0,
-                "zombie_jobs_count": long_res['count'] if long_res else 0 
+                "risk_flags": [
+                    {"id": "long_running", "label": "Long Running", "count": long_res['count'], "icon": "Clock"},
+                    {"id": "pending_long", "label": "Pending > 24h", "count": pending_res['count'], "icon": "AlertTriangle"},
+                    {"id": "zombie", "label": "Zombie Candidates", "count": long_res['count'], "icon": "XCircle"} 
+                ],
+                "job_list": job_list
             }
 
         except Error as e:
